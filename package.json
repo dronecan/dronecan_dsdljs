@@ -1,0 +1,16 @@
+{
+  "name": "dronecan_dsdljs",
+  "version": "1.0.0",
+  "description": "",
+  "main": "examples/node_test.js",
+  "scripts": {
+    "start": "node examples/node_test.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Huibean Luo",
+  "license": "MIT",
+  "dependencies": {
+    "long": "^5.3.1",
+    "underscore": "^1.13.7"
+  }
+}

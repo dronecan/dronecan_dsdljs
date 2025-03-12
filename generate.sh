@@ -1,0 +1,1 @@
+./dronecan_dsdljs.py ../DSDL/dronecan ../DSDL/ardupilot ../DSDL/uavcan ../DSDL/com --output ./dronecan
