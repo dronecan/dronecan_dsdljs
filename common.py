@@ -31,23 +31,3 @@ def get_primitive_kind(type):
         return "PrimitiveType.KIND_FLOAT"
     else:
         raise ValueError(f"Unsupported primitive kind: {type.kind}")
-
-def generate_primitive_type_instance(value_type, bitlen):
-    bits = f"data.getBits(msg.bitOffset, {bitlen})"
-    if value_type.kind == value_type.KIND_BOOLEAN:
-        return f"PrimitiveType.unpack(PrimitiveType.KIND_BOOLEAN, {bits}, {bitlen})" 
-    elif value_type.kind == value_type.KIND_UNSIGNED_INT:
-        return f"PrimitiveType.unpack(PrimitiveType.KIND_UNSIGNED_INT, {bits}, {bitlen}, {get_cast_mode(value_type)})"
-    elif value_type.kind == value_type.KIND_SIGNED_INT:
-        return f"PrimitiveType.unpack(PrimitiveType.KIND_SIGNED_INT, {bits}, {bitlen}, {get_cast_mode(value_type)})"
-    elif value_type.kind == value_type.KIND_FLOAT:
-        return f"PrimitiveType.unpack(PrimitiveType.KIND_FLOAT, {bits}, {bitlen})"
-    else:
-        raise NotImplementedError(f"Unsupported kind: {value_type.kind}")
-
-def get_tao(index, fields):
-    if index == len(fields) - 1:
-        return 'true'
-    else:
-        return 'false'
-

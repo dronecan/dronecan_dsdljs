@@ -4,8 +4,12 @@
   "description": "",
   "main": "dronecan/index.js",
   "scripts": {
+    "build": "python3 -B dronecan_dsdljs.py --output dronecan",
+    "prepare": "python3 -B prepare_bindings.py",
     "start": "node examples/node_test.js",
-    "test": "node --test test/*.test.js"
+    "test": "python3 -B test/run_js_tests.py",
+    "test:generator": "python3 -B -m unittest discover -s test",
+    "test:all": "npm test && npm run test:generator"
   },
   "author": "Huibean Luo",
   "license": "MIT",

@@ -165,5 +165,6 @@ cython_debug/
 .DS_Store
 .vscode
 node_modules/
+/.dsdljs-test-*/
 test.js
 update-configurator.sh
