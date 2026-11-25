@@ -131,6 +131,34 @@ test('TIDs advance independently and cannot skip a blocked ID after wraparound',
     assert.equal(manager.getNextTransferId(descriptor), 2);
 });
 
+test('encoding failure keeps the next TID, while a transfer handed to the adapter consumes it', t => {
+    const Node = require('../dronecan/node');
+    const node = new Node({ nodeId: 11 });
+    t.after(() => {
+        clearInterval(node.nodeStatusIntervalID);
+        node.resetSession();
+    });
+    const req = new DSDL.uavcan_protocol_param_GetSet_Request();
+    const send = () => node.request({ req, destNodeId: 42 });
+    const wireIds = [];
+    node.on('sendFrame', (_id, data) => wireIds.push(data.at(-1) & 31));
+    req.fields.index.value = 0.5;
+    assert.throws(send, /whole numbers/);
+    assert.deepEqual(wireIds, []);
+    req.fields.index.value = 0;
+
+    node.once('sendFrame', send);
+    assert.equal(send().transferId, 0);
+    assert.deepEqual(wireIds, [0, 1]);
+
+    req.fields.name.fromString('a multi-frame request');
+    node.once('sendFrame', () => { throw new Error('adapter disconnected'); });
+    assert.throws(send, /adapter disconnected/);
+    req.fields.name.fromString('');
+    assert.equal(send().transferId, 3);
+    assert.deepEqual(wireIds, [0, 1, 2, 3]);
+});
+
 test('broadcast TID wrap follows the descriptor across priority and link format changes', () => {
     for (const variation of ['priority', 'format']) {
         const manager = new TransferManager();
@@ -247,6 +275,31 @@ test('CRC/DSDL errors, non-extended frames and invalid DLCs cannot deliver a par
     assert.throws(() => new Transfer().fromFrames([first, new Frame(last.id, last.data, true, true)]));
     assert.equal(manager.addFrame(first), null);
     assert.equal(manager.addFrame(last).transferId, 7);
+});
+
+test('pending requests across a TID wrap can receive two distinct replies with the same TID in succession', () => {
+    const Node = require('../dronecan/node');
+    const node = new Node({ nodeId: 127 });
+    const delivered = [];
+    const request = () => node.request({
+        req: new DSDL.uavcan_protocol_GetNodeInfo_Request(),
+        destNodeId: 42,
+        callback: transfer => delivered.push(transfer.transferId),
+    });
+    const frames = new Transfer({
+        sourceNodeId: 42, destNodeId: 127, serviceNotMessage: true,
+        transferId: 0, payload: DSDL.uavcan_protocol_GetNodeInfo_Response.sampleMessage(),
+    }).toFrames();
+    try {
+        for (let i = 0; i < 32; i++) assert.equal(request().transferId, i);
+        for (const frame of frames) node.handleFrame(frame);
+        assert.equal(request().transferId, 0);
+        for (const frame of frames) node.handleFrame(frame);
+        assert.deepEqual(delivered, [0, 0]);
+    } finally {
+        clearInterval(node.nodeStatusIntervalID);
+        node.resetSession();
+    }
 });
 
 test('anonymous allocation fits one Classic or FD frame and derives the libcanard discriminator', () => {
