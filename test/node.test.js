@@ -106,6 +106,116 @@ function connect(client, server) {
     server.on('sendFrame', (...args) => client.emit('can-frame', ...args));
 }
 
+for (const canfd of [false, true]) {
+    test(`reentrant multi-frame GetSet requests stay in order over ${canfd ? 'CAN FD' : 'Classic CAN'}`, () => {
+        const client = node(11, canfd);
+        const server = node(42);
+        connect(client, server);
+        const names = ['A'.repeat(80), 'B'.repeat(80)];
+        const received = [];
+        const replies = [];
+        const wireIds = [];
+        server.on('uavcan.protocol.param.GetSet.Request', request => {
+            const name = request.payload.fields.name.toString();
+            received.push(name);
+            server.response({ transfer: request, res: paramResponse(name, 'integer_value', 1) });
+        });
+        client.on('sendFrame', (_id, data) => wireIds.push(data.at(-1) & 31));
+        const read = name => client.fetchNodeParam(42, 0, name, response => {
+            replies.push([name, response.payload.fields.name.toString()]);
+        });
+        client.once('sendFrame', () => read(names[1]));
+        read(names[0]);
+        assert.deepEqual(received, names);
+        assert.deepEqual(replies, names.map(name => [name, name]));
+        const framesPerRequest = wireIds.length / 2;
+        assert.ok(framesPerRequest > 1);
+        assert.deepEqual(wireIds, [...Array(framesPerRequest).fill(0), ...Array(framesPerRequest).fill(1)]);
+        assert.equal(client.callbacks.size, 0);
+    });
+}
+
+test('a peer reboot during a service send stops the old transfer', () => {
+    for (const canfd of [false, true]) {
+        const client = node(11, canfd);
+        const server = node(42);
+        connect(client, server);
+        const heartbeat = uptime => {
+            server.status.fields.uptime_sec.value = uptime;
+            server.request({ req: server.status, serviceNotMessage: false });
+        };
+        heartbeat(100);
+        const received = [];
+        const sent = [];
+        const errors = [];
+        server.on('uavcan.protocol.param.GetSet.Request', request => {
+            received.push(request.payload.fields.name.toString());
+            server.response({ transfer: request, res: paramResponse('NEXT', 'integer_value', 1) });
+        });
+        client.on('transfer-tx', transfer => {
+            if (transfer.payload instanceof DSDL.uavcan_protocol_param_GetSet_Request) sent.push(transfer.transferId);
+        });
+        let frames = 0;
+        client.on('sendFrame', (id) => {
+            if (((id >>> 16) & 255) === DSDL.uavcan_protocol_param_GetSet_Request.DTID && ++frames === 1) {
+                heartbeat(1);
+            }
+        });
+        const old = client.fetchNodeParam(42, 0, 'A'.repeat(80), assert.fail, err => errors.push(err.code));
+        assert.equal(old, null);
+        assert.equal(frames, 1);
+        assert.deepEqual(received, []);
+        assert.deepEqual(sent, []);
+        assert.deepEqual(errors, ['NODE_RESTARTED']);
+        const next = client.fetchNodeParam(42, 0, 'NEXT');
+        assert.deepEqual(received, ['NEXT']);
+        assert.deepEqual(sent, [next.transferId]);
+        assert.equal(client.callbacks.size, 0);
+    }
+});
+
+test('a queued send failure is reported to its caller and later transfers still run', () => {
+    const client = node(11);
+    const server = node(42);
+    const errors = [];
+    const received = [];
+    client.on('sendFrame', (_id, data) => {
+        if ((data.at(-1) & 31) === 1) throw new Error('adapter unavailable');
+    });
+    connect(client, server);
+    server.on('uavcan.protocol.param.GetSet.Request', request => {
+        const name = request.payload.fields.name.toString();
+        received.push(name);
+        server.response({ transfer: request, res: paramResponse(name, 'integer_value', 1) });
+    });
+    const read = name => client.fetchNodeParam(42, 0, name, null, err => errors.push([name, err.message]));
+    client.once('sendFrame', () => {
+        read('SECOND_PARAMETER');
+        read('THIRD_PARAMETER');
+    });
+    assert.equal(read('FIRST_PARAMETER').transferId, 0);
+    assert.deepEqual(errors, [['SECOND_PARAMETER', 'adapter unavailable']]);
+    assert.deepEqual(received, ['FIRST_PARAMETER', 'THIRD_PARAMETER']);
+    assert.equal(client.callbacks.size, 0);
+});
+
+test('a session change skips old queued frames and drains new-session traffic', () => {
+    const client = node(11);
+    const buses = [];
+    const errors = [];
+    client.on('sendFrame', (_id, _data, _len, bus) => buses.push(bus));
+    const read = name => client.fetchNodeParam(42, 0, name, null, err => errors.push(err.code));
+    client.once('sendFrame', () => {
+        read('SECOND_PARAMETER');
+        client.changeBus(1);
+        client.request({ req: client.status, serviceNotMessage: false });
+    });
+    assert.equal(read('FIRST_PARAMETER'), null);
+    assert.deepEqual(buses, [0, 1]);
+    assert.deepEqual(errors, ['SESSION_RESET', 'SESSION_RESET']);
+    assert.equal(client.callbacks.size, 0);
+});
+
 test('service responses must use the original request even when answered out of order', () => {
     const client = node(11);
     const server = node(42);

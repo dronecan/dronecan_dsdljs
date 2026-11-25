@@ -64,6 +64,7 @@ class Node extends EventEmitter {
         this.subscribers = {};
         this.subscribersMaxItems = 10;
         this.transferManager = new TransferManager();
+        this.txQueue = [];
         this.priority = 20; // Set default priority
         this.callbacks = new Map();
         this.cancelledServiceKeys = new Set();
@@ -312,6 +313,7 @@ class Node extends EventEmitter {
 
         const frames = transfer.framesFromPayload(payload);
         if (serviceNotMessage) {
+            transfer.peerSessionId = this.peerSessionIds[destNodeId];
             const key = descriptor + ':' + transfer.transferId;
             const timer = setTimeout(() => {
                 if (this.cancelRequest(transfer)) {
@@ -324,15 +326,7 @@ class Node extends EventEmitter {
             this.callbacks.set(key, { transfer, callback, onError, timer });
         }
 
-        try {
-            return this.sendTransfer(transfer, frames);
-        } catch (error) {
-            if (this.cancelRequest(transfer) && onError) {
-                this.notifyRequestFailure(transfer, onError, error);
-                return null;
-            }
-            throw error;
-        }
+        return this.sendTransfer(transfer, frames);
     }
 
     notifyRequestFailure(transfer, onError, error) {
@@ -372,19 +366,63 @@ class Node extends EventEmitter {
         });
         responseTransfer.bus = this.bus;
         responseTransfer.sessionId = this.sessionId;
+        responseTransfer.peerSessionId = transfer.peerSessionId;
         return this.sendTransfer(responseTransfer, responseTransfer.toFrames(res));
     }
 
     sendTransfer(transfer, frames) {
+        // sendFrame listeners can submit another transfer before the current frame returns.
+        const entry = { transfer, frames };
+        this.txQueue.push(entry);
+        if (this.txQueue.length > 1) return transfer;
+
+        let result = null;
+        const failures = [];
+        try {
+            for (const item of this.txQueue) {
+                try {
+                    const sent = this.sendFrames(item.transfer, item.frames, item !== entry);
+                    if (item === entry) result = sent;
+                } catch (error) {
+                    // Finish the queue even if the adapter or an error listener throws.
+                    failures.push(error);
+                }
+            }
+        } finally {
+            this.txQueue.length = 0;
+        }
+        if (failures.length) throw failures[0];
+        return result;
+    }
+
+    sendFrames(transfer, frames, queued) {
+        const pending = this.callbacks.get(transfer.serviceKey);
+        try {
+            return this.emitTransferFrames(transfer, frames);
+        } catch (error) {
+            const cancelled = this.cancelRequest(transfer);
+            // A queued caller already has its handle, so report its error on that transfer.
+            if (queued || (cancelled && pending.onError)) {
+                this.notifyRequestFailure(transfer, cancelled ? pending.onError : null, error);
+                return null;
+            }
+            throw error;
+        }
+    }
+
+    emitTransferFrames(transfer, frames) {
+        const sessionIsCurrent = () => transfer.sessionId === this.sessionId &&
+            (transfer.peerSessionId === undefined || transfer.peerSessionId === this.peerSessionIds[transfer.destNodeId]);
+        if (!sessionIsCurrent()) return null;
         for (const frame of frames) {
-            if (this.sessionId !== transfer.sessionId) return null;
+            if (transfer.serviceKey && this.callbacks.get(transfer.serviceKey)?.transfer !== transfer) return null;
             let messageId = frame.id;
             if (frame.extended) {
                 messageId = (messageId | (1 << 31)) >>> 0;
             }
             this.emit('sendFrame', messageId, frame.data, frame.data.length, transfer.bus, frame.canfd);
+            if (!sessionIsCurrent()) return null;
         }
-        if (this.sessionId !== transfer.sessionId) return null;
         this.emit('transfer-tx', transfer);
         return transfer;
     }
