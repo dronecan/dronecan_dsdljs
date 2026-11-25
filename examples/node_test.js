@@ -65,13 +65,10 @@ server.on('message', (msg, rinfo) => {
     // console.log(`Current clients: ${Array.from(clients).join(', ')}`);
     const data = new Uint8Array(msg);
     const messages = mavlinkProcessor.parseBuffer(data);
-    if (messages.length > 0) {
+    if (messages) {
         messages.forEach((message) => {
-            // console.log(message);
-            let name = message._name;
-            let srcSystem = message._header.srcSystem;
-            let srcComponent = message._header.srcComponent;
-            let msgId = message._header.msgId;
+            if (!message._header) return; // BAD_DATA diagnostics have no MAVLink header.
+            const { msgId, srcSystem, srcComponent } = message._header;
             switch (msgId) {
                 case mavlink20.MAVLINK_MSG_ID_HEARTBEAT:
                     // console.log('Heartbeat:', message);
@@ -80,9 +77,11 @@ server.on('message', (msg, rinfo) => {
                     enableMavlinkCanForward(localNode.bus);
                     break;
                 case mavlink20.MAVLINK_MSG_ID_CAN_FRAME:
+                case mavlink20.MAVLINK_MSG_ID_CANFD_FRAME:
                     let isExtended = message.id & dronecan.TransferManager.FlagEFF;
                     if (isExtended) {
-                        localNode.emit('can-frame', message.id, message.data, message.len);
+                        localNode.emit('can-frame', message.id, message.data, message.len,
+                            message.bus, msgId === mavlink20.MAVLINK_MSG_ID_CANFD_FRAME);
                     } else {
                         console.log('Standard frame');
                     }
@@ -114,11 +113,12 @@ localNode.on('uavcan.equipment.actuator.ArrayCommand', (transfer) => {
     // console.log(msg.toObj());
 });
 
-localNode.on('sendFrame', (messageId, data, len) => {
-    const msg = new mavlink20.messages.can_frame(
+localNode.on('sendFrame', (messageId, data, len, bus, canfd) => {
+    const FrameMessage = canfd ? mavlink20.messages.canfd_frame : mavlink20.messages.can_frame;
+    const msg = new FrameMessage(
         targetSystem, // target_system
         targetComponent, // target_component
-        localNode.bus, // bus
+        bus,
         len,
         messageId,
         data.toString('binary')

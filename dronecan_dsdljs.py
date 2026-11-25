@@ -8,19 +8,36 @@ import sys
 import os
 import argparse
 
+from importlib.util import find_spec
+from pathlib import Path
+
+# The JavaScript dronecan/ directory is also a Python namespace package.
+# Find the reference checkout before Python caches that namespace on import.
+dronecan_spec = find_spec("dronecan")
+if dronecan_spec is None or dronecan_spec.origin is None:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "../pydronecan"))
+
 try:
     import dronecan.dsdl
-except Exception as ex:
-    # for usage in CI try with a local pydronecan path
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "../pydronecan/"))
-    try:
-        import dronecan.dsdl
-    except Exception as ex:
-        print(ex)
-        print("Failed to import dronecan.dsdl, please install dronecan with 'python3 -m pip install dronecan'")
-        sys.exit(1)
+except ModuleNotFoundError as ex:
+    if ex.name not in ("dronecan", "dronecan.dsdl"):
+        raise
+    sys.exit("Failed to import dronecan.dsdl, please install dronecan with 'python3 -m pip install dronecan'")
 
 from dronecan_dsdljs_helpers import generate_dronecan_js
+
+
+def standard_dsdl_dirs():
+    # Wheels contain dsdl_specs. Source installs can use the DSDL checkout beside pydronecan.
+    package = Path(dronecan.__file__).resolve().parent
+    for root in (package / 'dsdl_specs', package.parent.parent / 'DSDL'):
+        dirs = [root / namespace for namespace in ('uavcan', 'dronecan', 'ardupilot', 'com')]
+        if all(path.is_dir() for path in dirs):
+            if (root / 'cuav').is_dir():
+                dirs.append(root / 'cuav')
+            return [str(path) for path in dirs]
+    raise FileNotFoundError("Standard DSDL definitions unavailable; pass the namespace directories explicitly")
+
 
 def generate_js_bindings(output_dir, dsdl_dirs):
     # Ensure the output directory exists
@@ -29,10 +46,12 @@ def generate_js_bindings(output_dir, dsdl_dirs):
 
     # Generate the DSDL bindings
     try:
-        messages = dronecan.dsdl.parse_namespaces(dsdl_dirs)
-        
+        messages = dronecan.dsdl.parse_namespaces(dsdl_dirs or standard_dsdl_dirs())
+        if not dsdl_dirs:
+            messages.sort(key=lambda dtype: dtype.full_name)
+
         # Generate the dronecan.js file
-        generate_dronecan_js(output_dir, messages)
+        generate_dronecan_js(output_dir, messages, uses_default_dsdl=not dsdl_dirs)
     except Exception as ex:
         print(f"Failed to generate DSDL bindings: {ex}")
         import traceback
@@ -42,7 +61,8 @@ def generate_js_bindings(output_dir, dsdl_dirs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate DroneCAN DSDL bindings for JavaScript")
     parser.add_argument("--output", required=True, help="Output directory for generated bindings")
-    parser.add_argument("dsdl_dirs", nargs='+', help="Directories containing DSDL definitions")
+    parser.add_argument("dsdl_dirs", nargs='*',
+                        help="DSDL namespace directories (default: PyDroneCAN standard definitions)")
     args = parser.parse_args()
 
     generate_js_bindings(args.output, args.dsdl_dirs)

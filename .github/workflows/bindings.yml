@@ -1,0 +1,95 @@
+name: Test and package DroneCAN bindings
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-24.04
+    env:
+      DSDL_REVISION: b4653c7abc3c47cb31b16efa24ea755232774756
+    defaults:
+      run:
+        working-directory: library
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: library
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out DSDL definitions
+        uses: actions/checkout@v6
+        with:
+          repository: DroneCAN/DSDL
+          ref: ${{ env.DSDL_REVISION }}
+          path: DSDL
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.12.0'
+          package-manager-cache: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install dronecan==1.0.27
+          npm ci
+
+      - name: Run codec, transport and generator tests
+        run: npm run test:all
+
+      - name: Build and pack the pinned DSDL definitions
+        run: |
+          npm run build -- ../DSDL/{uavcan,dronecan,ardupilot,com,cuav,mppt}
+          mkdir "$RUNNER_TEMP/package"
+          npm pack --pack-destination "$RUNNER_TEMP/package"
+
+      - name: Verify the packaged bindings in a clean consumer
+        run: |
+          mkdir "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init --yes >/dev/null
+          npm install --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP"/package/*.tgz
+          cmp "$GITHUB_WORKSPACE/library/dronecan/dsdl.js" node_modules/dronecan_dsdljs/dronecan/dsdl.js
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const { DSDL } = require('dronecan_dsdljs');
+          assert.equal(DSDL.bindingInfo.usesDefaultDsdl, false);
+          assert.equal(DSDL.messages[20500].FULL_NAME, 'ardupilot.equipment.power.BatteryTag');
+          assert.equal(DSDL.messages[344].FULL_NAME, 'dronecan.protocol.GlobalTime');
+          assert.equal(DSDL.messages[20009].FULL_NAME, 'mppt.Stream');
+          JS
+
+      - name: Upload verified npm package
+        uses: actions/upload-artifact@v7
+        with:
+          name: dronecan-dsdljs-${{ github.sha }}
+          path: ${{ runner.temp }}/package/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record build revisions and package checksum
+        run: |
+          cd "$RUNNER_TEMP/package"
+          {
+            echo '### DroneCAN bindings'
+            echo
+            echo "- Library commit: \`$GITHUB_SHA\`"
+            echo "- DSDL commit: \`$DSDL_REVISION\`"
+            echo
+            echo 'Package SHA-256'
+            echo '~~~'
+            sha256sum *.tgz
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
